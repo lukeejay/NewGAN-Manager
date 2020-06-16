@@ -35,8 +35,8 @@ jobs:
     - name: Build
       run: |
         briefcase create --no-docker
-        briefcase build
-        briefcase package
+        briefcase build --no-docker
+        briefcase package --no-docker
     - name: Save Installer
       uses: actions/upload-artifact@v1
       with:
