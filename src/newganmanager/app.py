@@ -3,13 +3,14 @@ NewGAN Replacement Management Tool
 """
 import toga
 from toga.style.pack import COLUMN, ROW
-import random
-from shutil import copyfileobj
-import json
-import re
 import os
 import logging
 from dhooks import Webhook, Embed, File
+from config_manager import Config_Manager
+from profile_manager import Profile_Manager
+from mapper import Mapper
+from rtfparser import RTF_Parser
+from progressbar import Progressbar
 
 
 class SourceSelection(toga.Selection):
@@ -33,6 +34,7 @@ class SourceSelection(toga.Selection):
 
 
 class NewGANManager(toga.App):
+
     def __init__(self, log):
         super().__init__()
         self.logger = log
@@ -46,25 +48,21 @@ class NewGANManager(toga.App):
         show the main window.
         """
         self.logger.info("Starting Application\n------------------------------------------------")
+        self.logger.info(str(self.paths.app))
 
         self.mode_info = {"Overwrite": "Overwrites already replaced faces",
                           "Preserve":  "Preserves already replaced faces",
                           "Generate": "Generates mapping from scratch."}
-        os.makedirs(".config", exist_ok=True)
-        self.cfg_path = ".config/cfg.json"
-        self.logger.info("Loading cfg.json")
-        self.config = self._load_config(self.cfg_path)
-        for k, v in self.config["Profile"].items():
-            if v:
-                self.cur_prf = k
-                break
+        os.makedirs(str(self.paths.app)+"/.config", exist_ok=True)
 
         self.logger.info("Loading current profile")
-        self.prf_cfg = self._load_config(".config/"+self.cur_prf+".json")
+        self.profile_manager = Profile_Manager(Config_Manager().get_latest_prf(str(self.paths.app)+"/.user/cfg.json"), str(self.paths.app))
+        self.profile_manager.migrate_config()
         self.logger.info("Creating GUI")
         self.main_box = toga.Box()
         self.logger.info("Created main box")
 
+        label_width = 125
         # TOP Profiles
         prf_box = toga.Box()
         self.logger.info("Created prf_box")
@@ -74,12 +72,12 @@ class NewGANManager(toga.App):
 
         self.prfsel_box = toga.Box()
         prf_lab = toga.Label(text="Create Profile: ")
-        prf_lab.style.update(width=125)
+        prf_lab.style.update(width=label_width)
 
         prfsel_lab = toga.Label(text="Select Profile: ")
-        prfsel_lab.style.update(width=125)
-        self.prfsel_lst = SourceSelection(items=list(self.config["Profile"].keys()), on_select=self._set_profile_status)
-        self.prfsel_lst.value = self.cur_prf
+        prfsel_lab.style.update(width=label_width)
+        self.prfsel_lst = SourceSelection(items=list(self.profile_manager.config["Profile"].keys()), on_select=self._set_profile_status)
+        self.prfsel_lst.value = self.profile_manager.cur_prf
         prfsel_btn = toga.Button(label="Delete", on_press=lambda e=None, c=self.prfsel_lst : self._delete_profile(c))
         prf_btn = toga.Button(label="Create", on_press=lambda e=None, d=prf_inp, c=self.prfsel_lst: self._create_profile(d, c))
 
@@ -87,8 +85,7 @@ class NewGANManager(toga.App):
         prf_box.add(prf_lab)
         prf_box.add(prf_inp)
         prf_box.add(prf_btn)
-        prf_lab.style.update(padding_top=7)
-        
+        prf_lab.style.update(padding_top=7) 
         prf_inp.style.update(direction=ROW, padding=(0, 20), flex=1)
 
         self.main_box.add(self.prfsel_box)
@@ -101,18 +98,16 @@ class NewGANManager(toga.App):
         # MID Path selections
         dir_box = toga.Box()
         dir_lab = toga.Label(text="Select Image Directory: ")
-        dir_lab.style.update(width=125)
-        self.dir_inp = toga.TextInput(readonly=True, initial=self.prf_cfg['img_dir'])
+        dir_lab.style.update(width=label_width)
+        self.dir_inp = toga.TextInput(readonly=True, initial=self.profile_manager.prf_cfg['img_dir'])
         self.dir_inp.style.update(direction=ROW, padding=(0, 20), flex=1)
-
         self.dir_btn = toga.Button(label="...", on_press=self.action_select_folder_dialog, enabled=False)
 
         rtf_box = toga.Box()
         rtf_lab = toga.Label(text="RTF File: ")
-        rtf_lab.style.update(width=125)
-        self.rtf_inp = toga.TextInput(readonly=True, initial=self.prf_cfg['rtf'])
+        rtf_lab.style.update(width=label_width)
+        self.rtf_inp = toga.TextInput(readonly=True, initial=self.profile_manager.prf_cfg['rtf'])
         self.rtf_inp.style.update(direction=ROW, padding=(0, 20), flex=1)
-
         self.rtf_btn = toga.Button(label="...", on_press=self.action_open_file_dialog, enabled=False)
 
         self.main_box.add(dir_box)
@@ -128,7 +123,7 @@ class NewGANManager(toga.App):
 
         gen_mode_box = toga.Box()
         self.genmde_lab = toga.Label(text="Mode: ")
-        self.genmde_lab.style.update(width=125)
+        self.genmde_lab.style.update(width=label_width)
         self.genmdeinfo_lab = toga.Label(text=self.mode_info["Generate"])
         self.genmde_lst = SourceSelection(items=list(self.mode_info.keys()), on_select=self.update_label)
         self.genmde_lst.value = "Generate"
@@ -146,17 +141,19 @@ class NewGANManager(toga.App):
         self.gen_btn.style.update(padding_bottom=20)
         self.gen_lab = toga.Label(text="")
 
-        self.gen_prg = toga.ProgressBar(max=110)
+        # self.gen_prg = toga.ProgressBar(max=110)
+        self.gen_prg = Progressbar(label=self.gen_lab)
         gen_box.add(self.gen_btn)
         gen_box.add(self.gen_lab)
         gen_box.add(self.gen_prg)
         self.main_box.add(gen_box)
-        self.gen_lab.style.update(padding_top=20)
+        self.gen_prg.style.update(width=570, alignment="center")
+        self.gen_lab.style.update(padding_top=20, padding_bottom=20, width=100, alignment="center")
 
         # Report bad image
         rep_box = toga.Box()
         self.rep_lab = toga.Label(text="Player UID: ")
-        self.rep_lab.style.update(width=125)
+        self.rep_lab.style.update(width=label_width)
         self.rep_inp = toga.TextInput(on_change=self.change_image)
         self.rep_img = toga.ImageView(toga.Image("resources/logo.png"))
         self.rep_img.style.update(height=180)
@@ -179,9 +176,6 @@ class NewGANManager(toga.App):
         rtf_box.style.update(padding_bottom=20)
         gen_mode_box.style.update(padding_bottom=20)
         rep_box.style.update(padding_top=20)
-        
-
-
         gen_box.style.update(direction=COLUMN, alignment='center')
         self.main_box.style.update(direction=COLUMN, padding=30, alignment='center')
 
@@ -193,48 +187,31 @@ class NewGANManager(toga.App):
         self.logger.info("Updating generation label")
         self.genmdeinfo_lab.text = self.mode_info[widget.value]
 
-    def _load_config(self, path):
-        with open(path, 'r') as fp:
-            data = json.load(fp)
-            return data
-
-    def _write_config(self, path, data):
-        with open(path, 'w') as fp:
-            json.dump(data, fp)
+    def set_btns(self, value):
+        if self.profile_manager.cur_prf == "No Profile":
+            self.gen_btn.enabled = False
+            self.dir_btn.enabled = False
+            self.rtf_btn.enabled = False
+            self.rep_btn.enabled = False
+        else:
+            self.gen_btn.enabled = value
+            self.dir_btn.enabled = value
+            self.rtf_btn.enabled = value
+            self.rep_btn.enabled = value
 
     def _set_profile_status(self, e):
         self.logger.info("switch profile: {}".format(e.value))
         if e.value is None:
-            self.logger.info("catch none {}".format(self.cur_prf))
-        elif e.value == self.cur_prf:
+            self.logger.info("catch none {}".format(self.profile_manager.cur_prf))
+        elif e.value == self.profile_manager.cur_prf:
             self.logger.info("catch same values")
-        # if e.value == "No Profile":
 
         else:
             name = e.value
-            self.config["Profile"][self.cur_prf] = False
-            if os.path.isfile(self.prf_cfg['img_dir']+"config.xml"):
-                with open('.config/'+self.cur_prf+'.xml', 'wb') as output, open(self.prf_cfg['img_dir']+'config.xml', 'rb') as input:
-                    copyfileobj(input, output)
-
-            self.config["Profile"][name] = True
-            self.cur_prf = name
-            self.prf_cfg = self._load_config(".config/"+self.cur_prf+".json")
-            if os.path.isfile('.config/'+self.cur_prf+'.xml'):
-                with open(self.prf_cfg['img_dir']+'config.xml', 'wb') as output, open('.config/'+name+'.xml', 'rb') as input:
-                    copyfileobj(input, output)
+            self.profile_manager.load_profile(name)
             self._refresh_inp()
-            if self.cur_prf == "No Profile":
-                self.gen_btn.enabled = False
-                self.dir_btn.enabled = False
-                self.rtf_btn.enabled = False
-                self.rep_btn.enabled = False
-            else:
-                self.gen_btn.enabled = True
-                self.dir_btn.enabled = True
-                self.rtf_btn.enabled = True
-                self.rep_btn.enabled = True
-            self._write_config(self.cfg_path, self.config)
+            self.set_btns(True)
+            Config_Manager().save_config(str(self.paths.app)+"/.user/cfg.json", self.profile_manager.config)
 
     def _refresh_inp(self, clear=False):
         self.logger.info("Refresh Input Buttons")
@@ -242,68 +219,21 @@ class NewGANManager(toga.App):
             self.dir_inp.clear()
             self.rtf_inp.clear()
         else:
-            self.dir_inp.value = self.prf_cfg['img_dir']
-            self.rtf_inp.value = self.prf_cfg['rtf']
+            self.dir_inp.value = self.profile_manager.prf_cfg['img_dir']
+            self.rtf_inp.value = self.profile_manager.prf_cfg['rtf']
 
     def _create_profile(self, ent, c):
         name = ent.value
-        self.logger.info("Create new profile: {}".format(name))
-        self.config["Profile"][name] = False
-        self._write_config(self.cfg_path, self.config)
-        self._write_config(".config/"+name+".json", {"imgs": {},
-                                                     "ethnics": {},
-                                                     "img_dir": "",
-                                                     "rtf": ""})
+        self.profile_manager.create_profile(name)
         ent.clear()
-        open('.config/'+name+'.xml', 'a').close
-        # self.cur_prf = name
         c.add_item(name)
 
     def _delete_profile(self, c):
         prf = c.value
-        self.logger.info("Delete profile: {}".format(prf))
-        if prf == "No Profile":
-            self.logger.info("Can't delet no profile")
-            self._throw_error("Can't delete 'No Profile'")
-            return
-        del self.config["Profile"][prf]
-        self.config["Profile"]["No Profile"] = True
-        try:
-            os.remove(self.prf_cfg['img_dir']+"config.xml")
-        except OSError:
-            pass
-        self.cur_prf = "No Profile"
-        self._write_config(self.cfg_path, self.config)
-        try:
-            os.remove(".config/"+prf+".json")
-            os.remove(".config/"+prf+".xml")
-        except OSError:
-            pass
+        self.profile_manager.delete_profile(prf)
         c.remove_item(prf)
         self._refresh_inp(True)
-        self.gen_btn.enabled = False
-        self.dir_btn.enabled = False
-        self.rtf_btn.enabled = False
-        self.rep_btn.enabled = False
-
-    def parse_rtf(self, path):
-        self.logger.info("Parse rtf file: {}".format(path))
-        UID_regex = re.compile('([0-9]){8,10}')
-        result_data = []
-        rtf = open(path, 'r', encoding="UTF-8")
-        self.logger.info(rtf)
-        rtf_data = []
-        for line in rtf:
-            if UID_regex.search(line):
-                # self.logger.info(line.strip())
-                rtf_data.append(line.strip())
-        for newgen in rtf_data:
-            data_fields = newgen.split('|')
-            sec_nat = data_fields[3].strip()
-            if sec_nat == '':
-                sec_nat = None
-            result_data.append([data_fields[1].strip(), data_fields[2].strip(), sec_nat, data_fields[7].strip()])
-        return result_data
+        self.set_btns(False)
 
     def _throw_error(self, msg):
         self.logger.info("Error window {}:".format(msg))
@@ -312,9 +242,6 @@ class NewGANManager(toga.App):
     def _show_info(self, msg):
         self.logger.info("Info window: {}".format(msg))
         self.main_window.info_dialog("Info", msg)
-        self.gen_lab.text = ""
-        self.gen_prg.stop()
-        self.gen_prg.value = 0
 
     def action_select_folder_dialog(self, widget):
         self.logger.info("Select Folder...")
@@ -323,8 +250,8 @@ class NewGANManager(toga.App):
                 title="Select image root folder"
             )
             self.dir_inp.value = path_names[0]+"/"
-            self.prf_cfg['img_dir'] = path_names[0]+"/"
-            self._write_config(".config/"+self.cur_prf+".json", self.prf_cfg)
+            self.profile_manager.prf_cfg['img_dir'] = path_names[0]+"/"
+            Config_Manager().save_config(str(self.paths.app)+"/.user/"+self.profile_manager.cur_prf+".json", self.profile_manager.prf_cfg)
 
         except Exception:
             pass
@@ -340,12 +267,12 @@ class NewGANManager(toga.App):
             self.logger.info("Created file-dialog")
             if fname is not None:
                 self.rtf_inp.value = fname
-                self.prf_cfg['rtf'] = fname
-                self._write_config(".config/"+self.cur_prf+".json", self.prf_cfg)
+                self.profile_manager.prf_cfg['rtf'] = fname
+                Config_Manager().save_config(str(self.paths.app)+"/.user/"+self.profile_manager.cur_prf+".json", self.profile_manager.prf_cfg)
             else:
-                self.prf_cfg['rtf'] = ""
+                self.profile_manager.prf_cfg['rtf'] = ""
                 self.rtf_inp.value = ""
-                self._write_config(".config/"+self.cur_prf+".json", self.prf_cfg)
+                Config_Manager().save_config(str(self.paths.app)+"/.user/"+self.profile_manager.cur_prf+".json", self.profile_manager.prf_cfg)
         except Exception:
             self.logger.error("Fatal error in main loop", exc_info=True)
             pass
@@ -353,135 +280,47 @@ class NewGANManager(toga.App):
     def _replace_faces(self, widget):
         self.logger.info("Start Replace Faces")
         # get values from UI elements
-        rtf = self.prf_cfg['rtf']
-        img_dir = self.prf_cfg['img_dir']
-        profile = self.cur_prf
+        rtf = self.profile_manager.prf_cfg['rtf']
+        img_dir = self.profile_manager.prf_cfg['img_dir']
+        profile = self.profile_manager.cur_prf
         mode = self.genmde_lst.value
+        if not os.path.isfile(rtf):
+            self._throw_error("The RTF file doesn't exist!")
+            self.gen_prg.stop()
+            self.profile_manager.prf_cfg['rtf'] = ''
+            return
+        if not os.path.isdir(img_dir):
+            self._throw_error("The image directory doesn't exist!")
+            self.gen_prg.stop()
+            self.profile_manager.prf_cfg['img_dir'] = ''
+            return
         self.logger.info("rtf: {}".format(rtf))
         self.logger.info("img_dir: {}".format(img_dir))
         self.logger.info("profile: {}".format(profile))
         self.logger.info("mode: {}".format(mode))
-        # parse rtf
-        if '' in [rtf, img_dir]:
-            self._throw_error("Select RTF and/or image directory!")
-            self.gen_lab.text = ""
-            return
         self.gen_prg.start()
-        self.gen_lab.tex = "Parsing RTF..."
-        # yield 1
-        rtf_data = self.parse_rtf(rtf)
-        self.gen_prg.max = len(rtf_data)+10
-        with open(".config/config_template", "r") as fp:
-            config_template = fp.read()
-        # walk all img subdirs and get all filenames. Create map
-        # all_ethnicities = ["East European", "Scandinavian", "Mediterranean", "Arabian",
-        #                  "African", "East Asian", "Central Asian", "Central European"]
-        # all_images = []
-        self.gen_lab.text = "Load profile config and create image set..."
-        # yield 1
-        prf_cfg = self._load_config(".config/"+profile+".json")
-        if mode == "Generate":
-            prf_cfg['imgs'] = {}
-            prf_cfg['ethnics'] = {}
-        prf_map = prf_cfg["imgs"]
-        prf_eth_map = prf_cfg['ethnics']
-        prf_imgs = set(prf_cfg["imgs"].values())
-        xml_string = []
-        self.gen_lab.text = "Restore already replaced faces if applicable..."
-        # yield 1
-        for k, v in prf_map.items():
-            xml_string.append("<record from=\"{}\" to=\"graphics/pictures/person/{}/portrait\"/>".format(prf_eth_map[k]+"/"+v, k))
-
-        # map rtf_data to ethnicities
-        self.gen_lab.text = "Map player to ethnicity..."
-        # yield 1
-        for i, player in enumerate(rtf_data):
-            n2_ethnic = None
-            if player[2]:
-                # print("DO 2nd!")
-                try:
-                    n2_ethnic = self.config["Ethnics"][player[2]]
-                except Exception:
-                    self.logger.info("Havent found 2nd Nation")
-                    continue
-            try:        
-                n1_ethnic = self.config["Ethnics"][player[1]]
-            except Exception:
-                self.logger.info("Havent found 1st Nation")
-                continue
-            if player[3] == "1":
-                if "EECA" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "EECA"
-                if "Italmed" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "Italmed"
-                if "SAMed" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "SAMed"
-                if "South American" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "South American"
-                if "SpanMed" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "SpanMed"
-                if "YugoGreek" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "YugoGreek"
-            elif player[3] in ["3", "6", "7", "8", "9"]:
-                p_ethnic = "African"
-            elif player[3] == "10":
-                p_ethnic = "Asian"
-            elif player[3] == "2":
-                p_ethnic = "MENA"
-                if "MESA" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "MESA"
-            elif player[3] == "5":
-                p_ethnic = "Seasian"
-            elif player[3] == "0":
-                p_ethnic = "Central European"
-                if "Scandinavian" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "Scandinavian"
-                elif "Caucasian" in [n1_ethnic, n2_ethnic]:
-                    p_ethnic = "Caucasian"
-            elif player[3] == "4":
-                p_ethnic = "MESA"
-            if player[0] in prf_map:
-                if mode == "Preserve":
-                    self.logger.info("Preserve: {} {}".format(i, p_ethnic))
-                    self.gen_prg.value += 1
-                    # yield 0.001
-                    continue
-                elif mode == "Overwrite":
-                    self.logger.info("Overwrite: {} {}".format(i, p_ethnic))
-                    player_img = prf_map[player[0]]
-                    prf_imgs.remove(player_img)
-            eth_imgs = set([f.name for f in os.scandir(self.prf_cfg['img_dir']+p_ethnic) if f.is_file()])
-            selection_pool = eth_imgs - prf_imgs
-            # print("eth_imgs:", eth_imgs)
-            # print("prf_imgs:", prf_imgs)
-            # print("sel pool:", selection_pool)
-            player_img = random.choice(tuple(selection_pool))
-            prf_map[player[0]] = player_img
-            prf_eth_map[player[0]] = p_ethnic
-            prf_imgs.add(player_img)
-            player_img = player_img.split('.')[0]
-
-        # create config file entry
-            xml_string.append("<record from=\"{}\" to=\"graphics/pictures/person/{}/portrait\"/>".format(p_ethnic+"/"+player_img, player[0]))
-            self.gen_prg.value += 1
-            # yield 0.001
-            self.logger.info("{} {}".format(i, p_ethnic))
-
+        self.gen_prg.update_label("Parsing RTF")
+        yield 0.1
+        rtf_data = RTF_Parser().parse_rtf(rtf)
+        self.gen_prg.update_progress(20)
+        self.gen_prg.update_label("Map player to ethnicity")
+        yield 0.1
+        mapping_data = Mapper(img_dir, self.profile_manager).generate_mapping(rtf_data, mode)
+        self.gen_prg.update_progress(60)
+        self.gen_prg.update_label("Generate config.xml")
+        yield 0.1
+        self.profile_manager.write_xml(mapping_data)
         # save profile metadata (used pics and config.xml)
-        self.gen_lab.text = "Generate config.xml..."
-        # yield 1
-        xml_players = "\n".join(xml_string)
-        xml_config = config_template.replace("[players]", xml_players)
-        with open(self.prf_cfg['img_dir']+"config.xml", 'w') as fp:
-            fp.write(xml_config)
-        self.gen_lab.text = "Save metadata for profile..."
-        # yield 1
-        prf_cfg["imgs"] = prf_map
-        self._write_config(".config/"+profile+".json", prf_cfg)
-        self.gen_prg.value += 10
-        # yield 0
-        self.gen_lab.text = "Finished! :)"
+        self.gen_prg.update_label("Save metadata for profile")
+        self.gen_prg.update_progress(10)
+        yield 0.1
+        Config_Manager().save_config(str(self.paths.app)+"/.user/"+profile+".json", self.profile_manager.prf_cfg)
+        self.gen_prg.update_progress(10)
+        yield 0.1
+        self.gen_prg.update_label("Finished! :)")
+        yield 0.1
         self._show_info("Finished! :)")
+        self.gen_prg.stop()
 
     def change_image(self, id):
         self.logger.info("try to change image preview")
@@ -516,6 +355,7 @@ class NewGANManager(toga.App):
         embed.add_field(name='File', value=img_path)
 
         hook.send(embed=embed, file=file)
+        self._show_info("Thanks for Reporting!")
 
 
 def main():

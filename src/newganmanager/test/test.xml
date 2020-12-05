@@ -15,7 +15,8 @@
                 -->
 
         <list id="maps">
-				[players]
+            <record from="African/African1" to="graphics/pictures/person/0123456789/portrait"/>
+
         </list>
 </record>
 
